@@ -1,165 +1,345 @@
-# SPECTER-ALLIANCE     by_SpecterZone1
-
+#!/data/data/com.termux/files/usr/bin/python3
+# -*- coding: utf-8 -*-
 import os
 import time
-import re
-from datetime import datetime
+import random
+import json
+import hashlib
+from flask import Flask, request, render_template_string, session, redirect, url_for, flash
+import requests
+from colorama import init, Fore, Style
 
-class R:
-    GREEN = '\033[92m'
-    RED = '\033[91m'
-    YELLOW = '\033[93m'
-    CYAN = '\033[96m'
-    RESET = '\033[0m'
+# Colorama başlatma (terminal log için)
+init()
 
-def clear():
-    os.system("clear" if os.name == "posix" else "cls")
+# Flask uygulaması
+app = Flask(__name__)
+app.secret_key = 'necroz31_hacker_secret_2025'  # Oturum için güvenlik anahtarı
 
-def luhn_check(card_number):
-    card_number = card_number.replace(" ", "")
-    if not card_number.isdigit():
+# Kullanıcı veritabanı (yerel JSON simülasyonu)
+users_file = '/sdcard/necroz31_users.json'
+if not os.path.exists(users_file):
+    with open(users_file, 'w', encoding='utf-8') as f:
+        json.dump({}, f)
+
+# API ayarları
+CHECKER_API_URL = 'https://api.chkr.cc/'
+
+# Loglama fonksiyonu
+def yaz_log(mesaj):
+    zaman_damgasi = time.strftime("%Y-%m-%d %H:%M:%S")
+    log_mesaji = f"[{zaman_damgasi}] NECROZ31 CHECKER {mesaj}"
+    print(Fore.GREEN + log_mesaji + Style.RESET_ALL)
+    log_dizini = "/sdcard/.necroz31_checker_logs"
+    os.makedirs(log_dizini, exist_ok=True)
+    with open(f"{log_dizini}/checker_log_{zaman_damgasi.split()[0]}.txt", "a", encoding="utf-8") as f:
+        f.write(f"{log_mesaji}\n")
+
+# Kullanıcı kayıt fonksiyonu
+def kayit_ol(username, password):
+    with open(users_file, 'r', encoding='utf-8') as f:
+        users = json.load(f)
+    if username in users:
         return False
-    total = 0
-    reverse_digits = card_number[::-1]
-    for i, digit in enumerate(reverse_digits):
-        n = int(digit)
-        if i % 2 == 1:
-            n *= 2
-            if n > 9:
-                n -= 9
-        total += n
-    return total % 10 == 0
+    users[username] = generate_password_hash(password)
+    with open(users_file, 'w', encoding='utf-8') as f:
+        json.dump(users, f)
+    yaz_log(f"Kullanıcı kaydedildi: {username}")
+    return True
 
-def detect_card_type(card_number):
-    card_number = card_number.replace(" ", "")
-    if re.match(r'^4\d{12}(\d{3})?$', card_number):
-        return "Visa"
-    elif re.match(r'^(5[1-5]\d{14}|2(2[2-9]\d{12}|[3-6]\d{13}|7[01]\d{12}|720\d{12}))$', card_number):
-        return "MasterCard"
-    elif re.match(r'^3[47]\d{13}$', card_number):
-        return "American Express"
-    elif re.match(r'^(6011\d{12}|65\d{14}|64[4-9]\d{13}|622(12[6-9]|1[3-9]\d|[2-8]\d{2}|9[01]\d|92[0-5])\d{10})$', card_number):
-        return "Discover"
-    else:
-        return "Bilinmeyen"
+# Kullanıcı giriş fonksiyonu
+def giris_yap(username, password):
+    with open(users_file, 'r', encoding='utf-8') as f:
+        users = json.load(f)
+    if username in users and check_password_hash(users[username], password):
+        session['username'] = username
+        yaz_log(f"Kullanıcı giriş yaptı: {username}")
+        return True
+    return False
 
-def bin_to_bank(card_number):
-    bin_bank = {
-        "411111": "Chase Bank",
-        "550000": "Bank of America",
-        "340000": "American Express",
-        "601100": "Discover"
+# Checker API çağrısı
+def checker_api_cagiri(kart_numarasi, son_kullanma, cvv):
+    headers = {'Content-Type': 'application/json'}
+    data = {
+        "card_number": kart_numarasi,
+        "expiry": son_kullanma,
+        "cvv": cvv
     }
-    bin6 = card_number.replace(" ", "")[:6]
-    return bin_bank.get(bin6, "Bilinmeyen Banka")
-
-def check_length_by_type(card_number, card_type):
-    length = len(card_number.replace(" ", ""))
-    if card_type == "Visa":
-        return length in [13, 16, 19]
-    elif card_type == "MasterCard":
-        return length == 16
-    elif card_type == "American Express":
-        return length == 15
-    elif card_type == "Discover":
-        return length == 16
-    else:
-        return False
-
-def tarih_check(month, year):
     try:
-        if not (month.isdigit() and year.isdigit()):
-            return False
-        now = datetime.now()
-        exp_date = datetime(int(year), int(month), 1)
-        return exp_date >= datetime(now.year, now.month, 1)
-    except:
-        return False
-
-def cvv_check(cvv, card_type):
-    if not cvv.isdigit():
-        return False
-    if card_type == "American Express":
-        return len(cvv) == 4
-    else:
-        return len(cvv) == 3
-
-def kart_kontrol_et():
-    clear()
-    print(f"{R.CYAN}📋 Kredi Kartı Doğrulama{R.RESET}\n")
-    cc = input("💳 Kart numarası (xxxx xxxx xxxx xxxx): ").strip()
-    if not re.match(r'^[\d ]+$', cc):
-        print(f"{R.RED}❌ Kart numarası sadece rakam ve boşluk içermeli!{R.RESET}")
-        input("\nDevam etmek için Enter'a bas...")
-        return
-
-    card_type = detect_card_type(cc)
-    bank_name = bin_to_bank(cc)
-
-    ay = input("📅 Son kullanma ayı (MM): ").strip()
-    yil = input("📅 Son kullanma yılı (YYYY): ").strip()
-    cvv = input("🔐 CVV (3 veya 4 haneli): ").strip()
-
-    print(f"\n{R.YELLOW}⏳ Kontrol ediliyor...{R.RESET}\n")
-    time.sleep(1)
-
-    valid = True
-
-    if not luhn_check(cc):
-        print(f"{R.RED}❌ Kart numarası geçersiz (Luhn hatası){R.RESET}")
-        valid = False
-    else:
-        print(f"{R.GREEN}✅ Kart numarası geçerli (Luhn OK){R.RESET}")
-
-    if not check_length_by_type(cc, card_type):
-        print(f"{R.RED}❌ Kart numarası uzunluğu {card_type} için uygun değil{R.RESET}")
-        valid = False
-    else:
-        print(f"{R.GREEN}✅ Kart numarası uzunluğu {card_type} için uygun{R.RESET}")
-
-    if not tarih_check(ay, yil):
-        print(f"{R.RED}❌ Son kullanma tarihi geçersiz veya geçmiş{R.RESET}")
-        valid = False
-    else:
-        print(f"{R.GREEN}✅ Son kullanma tarihi geçerli{R.RESET}")
-
-    if not cvv_check(cvv, card_type):
-        print(f"{R.RED}❌ CVV geçersiz (Kart tipine göre uygun değil){R.RESET}")
-        valid = False
-    else:
-        print(f"{R.GREEN}✅ CVV geçerli{R.RESET}")
-
-    print(f"\nKart Türü: {card_type}")
-    print(f"Banka: {bank_name}")
-
-    if valid:
-        print(f"\n{R.GREEN}🎉 Kart BİLGİLERİ GEÇERLİ{R.RESET}")
-    else:
-        print(f"\n{R.RED}⚠️ Kart bilgileri geçersiz{R.RESET}")
-
-    input("\nDevam etmek için Enter'a bas...")
-
-def menu():
-    while True:
-        clear()
-        print(f"SPECTER-ALLIANCE     by_SpecterZone1\n")
-        print(f"""
-{R.CYAN}╔════════════════════════════╗
-║      🧪 Gelişmiş CC CHECKER 🧪       ║
-╠════════════════════════════╣
-║ 1. Kart kontrolü yap       ║
-║ 2. Çıkış                   ║
-╚════════════════════════════╝{R.RESET}
-""")
-        secim = input("Seçiminiz: ").strip()
-        if secim == "1":
-            kart_kontrol_et()
-        elif secim == "2":
-            print("\nÇıkılıyor...\n")
-            break
+        response = requests.post(CHECKER_API_URL, json=data, headers=headers, timeout=10)
+        if response.status_code == 200:
+            result = response.json()
+            yaz_log(f"Checker sonucu: {result}")
+            return result
         else:
-            print(f"{R.RED}Geçersiz seçim!{R.RESET}")
-            time.sleep(1)
+            yaz_log(f"API hatası: {response.status_code}")
+            return {"error": "API Hatası", "status_code": response.status_code}
+    except Exception as e:
+        yaz_log(f"API çağrı hatası: {e}")
+        return {"error": str(e)}
 
-if __name__ == "__main__":
-    menu()
+# Hacker tarzı banner (HTML içinde kullanılacak)
+HACKER_BANNER = """
+<div style="background: #000; color: #0f0; font-family: 'Courier New', monospace; padding: 10px; text-align: center;">
+    <h1>╔════════════════════════════════════╗</h1>
+    <h1>║ NECROZ31 - HACKER CHECKER SYSTEM  ║</h1>
+    <h1>╚════════════════════════════════════╝</h1>
+    <p style="color: #ff0;">Beyaz Şapkalı Hacker Grubu - 2025</p>
+</div>
+"""
+
+# Ana sayfa (giriş/kayıt kontrolü)
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if 'username' in session:
+        return redirect(url_for('dashboard'))
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'register':
+            username = request.form['username']
+            password = request.form['password']
+            if kayit_ol(username, password):
+                flash('Kayıt başarılı! Giriş yapabilirsiniz.', 'success')
+            else:
+                flash('Kullanıcı adı zaten mevcut!', 'danger')
+        elif action == 'login':
+            username = request.form['username']
+            password = request.form['password']
+            if giris_yap(username, password):
+                return redirect(url_for('dashboard'))
+            else:
+                flash('Geçersiz kullanıcı adı veya şifre!', 'danger')
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>NECROZ31 Checker</title>
+        <style>
+            body { background: #1a1a1a; color: #0f0; font-family: 'Courier New', monospace; margin: 0; padding: 20px; }
+            .container { max-width: 500px; margin: 50px auto; background: #222; padding: 20px; border: 2px solid #0f0; }
+            .form-group { margin-bottom: 15px; }
+            label { display: block; margin-bottom: 5px; }
+            input { width: 100%; padding: 8px; background: #333; border: 1px solid #0f0; color: #0f0; }
+            button { padding: 10px 20px; background: #0f0; color: #000; border: none; cursor: pointer; }
+            button:hover { background: #0c0; }
+            .flash { padding: 10px; margin-bottom: 10px; }
+            .success { background: #0f0; color: #000; }
+            .danger { background: #f00; color: #fff; }
+        </style>
+    </head>
+    <body>
+        {{ banner|safe }}
+        <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="flash {{ category }}">{{ message }}</div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+            <h2>Giriş Yap</h2>
+            <form method="POST">
+                <input type="hidden" name="action" value="login">
+                <div class="form-group">
+                    <label>Kullanıcı Adı:</label>
+                    <input type="text" name="username" required>
+                </div>
+                <div class="form-group">
+                    <label>Şifre:</label>
+                    <input type="password" name="password" required>
+                </div>
+                <button type="submit">Giriş Yap</button>
+            </form>
+            <h2>Kayıt Ol</h2>
+            <form method="POST">
+                <input type="hidden" name="action" value="register">
+                <div class="form-group">
+                    <label>Kullanıcı Adı:</label>
+                    <input type="text" name="username" required>
+                </div>
+                <div class="form-group">
+                    <label>Şifre:</label>
+                    <input type="password" name="password" required>
+                </div>
+                <button type="submit">Kayıt Ol</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    """, banner=HACKER_BANNER)
+
+# Dashboard (kontrol paneli)
+@app.route('/dashboard', methods=['GET', 'POST'])
+def dashboard():
+    if 'username' not in session:
+        return redirect(url_for('index'))
+    if request.method == 'POST':
+        kart_numarasi = request.form['card_number']
+        son_kullanma = request.form['expiry']
+        cvv = request.form['cvv']
+        result = checker_api_cagiri(kart_numarasi, son_kullanma, cvv)
+        flash(f"Sonuç: {json.dumps(result)}", 'success' if 'error' not in result else 'danger')
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>NECROZ31 Checker - Dashboard</title>
+        <style>
+            body { background: #1a1a1a; color: #0f0; font-family: 'Courier New', monospace; margin: 0; padding: 20px; }
+            .container { max-width: 800px; margin: 50px auto; background: #222; padding: 20px; border: 2px solid #0f0; }
+            .form-group { margin-bottom: 15px; }
+            label { display: block; margin-bottom: 5px; }
+            input { width: 100%; padding: 8px; background: #333; border: 1px solid #0f0; color: #0f0; }
+            button { padding: 10px 20px; background: #0f0; color: #000; border: none; cursor: pointer; }
+            button:hover { background: #0c0; }
+            .flash { padding: 10px; margin-bottom: 10px; }
+            .success { background: #0f0; color: #000; }
+            .danger { background: #f00; color: #fff; }
+            .menu { margin-top: 20px; }
+            .menu a { color: #0f0; text-decoration: none; margin-right: 15px; }
+            .menu a:hover { color: #ff0; }
+        </style>
+    </head>
+    <body>
+        {{ banner|safe }}
+        <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="flash {{ category }}">{{ message }}</div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+            <h2>Merhaba, {{ session['username'] }}!</h2>
+            <form method="POST">
+                <div class="form-group">
+                    <label>Kart Numarası:</label>
+                    <input type="text" name="card_number" required>
+                </div>
+                <div class="form-group">
+                    <label>Son Kullanma Tarihi (MM/YY):</label>
+                    <input type="text" name="expiry" required>
+                </div>
+                <div class="form-group">
+                    <label>CVV:</label>
+                    <input type="text" name="cvv" required>
+                </div>
+                <button type="submit">Kontrol Et</button>
+            </form>
+            <div class="menu">
+                <a href="{{ url_for('settings') }}">Ayarlar</a>
+                <a href="{{ url_for('logs') }}">Loglar</a>
+            </div>
+        </div>
+    </body>
+    </html>
+    """, banner=HACKER_BANNER)
+
+# Ayarlar menüsü
+@app.route('/settings', methods=['GET', 'POST'])
+def settings():
+    if 'username' not in session:
+        return redirect(url_for('index'))
+    if request.method == 'POST':
+        # Ayarları burada işleyebilirsin (örneğin tema değiştirme)
+        flash('Ayarlar güncellendi!', 'success')
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>NECROZ31 Checker - Ayarlar</title>
+        <style>
+            body { background: #1a1a1a; color: #0f0; font-family: 'Courier New', monospace; margin: 0; padding: 20px; }
+            .container { max-width: 500px; margin: 50px auto; background: #222; padding: 20px; border: 2px solid #0f0; }
+            .form-group { margin-bottom: 15px; }
+            label { display: block; margin-bottom: 5px; }
+            input { width: 100%; padding: 8px; background: #333; border: 1px solid #0f0; color: #0f0; }
+            button { padding: 10px 20px; background: #0f0; color: #000; border: none; cursor: pointer; }
+            button:hover { background: #0c0; }
+            .flash { padding: 10px; margin-bottom: 10px; }
+            .success { background: #0f0; color: #000; }
+            .danger { background: #f00; color: #fff; }
+            .menu { margin-top: 20px; }
+            .menu a { color: #0f0; text-decoration: none; margin-right: 15px; }
+            .menu a:hover { color: #ff0; }
+        </style>
+    </head>
+    <body>
+        {{ banner|safe }}
+        <div class="container">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="flash {{ category }}">{{ message }}</div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+            <h2>Ayarlar</h2>
+            <form method="POST">
+                <div class="form-group">
+                    <label>Tema:</label>
+                    <input type="text" name="theme" value="Hacker" readonly>
+                </div>
+                <button type="submit">Kaydet</button>
+            </form>
+            <div class="menu">
+                <a href="{{ url_for('dashboard') }}">Geri Dön</a>
+            </div>
+        </div>
+    </body>
+    </html>
+    """, banner=HACKER_BANNER)
+
+# Loglar menüsü
+@app.route('/logs')
+def logs():
+    if 'username' not in session:
+        return redirect(url_for('index'))
+    log_dizini = "/sdcard/.necroz31_checker_logs"
+    if os.path.exists(log_dizini):
+        log_dosyasi = max([f for f in os.listdir(log_dizini) if f.endswith(".txt")], key=lambda x: os.path.getctime(os.path.join(log_dizini, x)))
+        with open(os.path.join(log_dizini, log_dosyasi), "r", encoding="utf-8") as f:
+            log_icerik = f.read()
+    else:
+        log_icerik = "Log bulunamadı."
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>NECROZ31 Checker - Loglar</title>
+        <style>
+            body { background: #1a1a1a; color: #0f0; font-family: 'Courier New', monospace; margin: 0; padding: 20px; }
+            .container { max-width: 800px; margin: 50px auto; background: #222; padding: 20px; border: 2px solid #0f0; }
+            .log-content { white-space: pre-wrap; }
+            .menu { margin-top: 20px; }
+            .menu a { color: #0f0; text-decoration: none; margin-right: 15px; }
+            .menu a:hover { color: #ff0; }
+        </style>
+    </head>
+    <body>
+        {{ banner|safe }}
+        <div class="container">
+            <h2>Log Kayıtları</h2>
+            <div class="log-content">{{ log_content }}</div>
+            <div class="menu">
+                <a href="{{ url_for('dashboard') }}">Geri Dön</a>
+            </div>
+        </div>
+    </body>
+    </html>
+    """, banner=HACKER_BANNER, log_content=log_icerik)
+
+# Oturumu kalıcı hale getir (çıkış yok)
+@app.route('/logout')
+def logout():
+    flash('Çıkış yapılmadı, oturum kalıcıdır!', 'info')
+    return redirect(url_for('dashboard'))
+
+if __name__ == '__main__':
+    # Terminalde başlatma mesajı
+    print(Fore.RED + "==========================================", end="", flush=True)
+    print(Fore.GREEN + "=== NECROZ31 CHECKER SİSTEMİ BAŞLATILIYOR ===", end="", flush=True)
+    print(Fore.RED + "==========================================" + Style.RESET_ALL, end="", flush=True)
+    yaz_log("Sistem başlatıldı")
+    # Flask uygulamasını çalıştır
+    app.run(host='0.0.0.0', port=5000, debug=False)
